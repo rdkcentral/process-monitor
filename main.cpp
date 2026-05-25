@@ -32,7 +32,7 @@ static void displayUsage()
     printf("    -h, --help          Print this help and exit\n");
     printf("    -d, --duration      How long to capture data for (seconds)\n");
     printf("    -o  --output        File to save results to\n");
-    printf("    -m, --mem           Capture memory data\n");
+    printf("    -m, --mem <path>    Capture memory data (path to libexithandler.so)\n");
 }
 
 /**
