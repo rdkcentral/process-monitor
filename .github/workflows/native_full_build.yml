@@ -1,0 +1,45 @@
+name: Build ProcessMonitor in Native Environment
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths: ['**/*.c', '**/*.cpp', '**/*.cc', '**/*.cxx', '**/*.h', '**/*.hpp', '**/*.sh', '**/CMakeLists.txt']
+
+jobs:
+  build-processmonitor-on-pr:
+    name: Build ProcessMonitor component
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/rdkcentral/docker-device-mgt-service-test/native-platform:1.6.9
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Install Dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake build-essential
+
+      - name: Create build directory
+        run: |
+          mkdir -p build
+          cd build
+
+      - name: Configure with CMake
+        run: |
+          cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ../
+
+      - name: Build the component
+        run: |
+          cd build
+          make -j$(nproc)
+
+      - name: Verify build output
+        run: |
+          ls -la build/ProcessMonitor || echo "ProcessMonitor binary not found"
+          ls -la build/libexithandler.so* || echo "exitHandler library not found"
+          file build/ProcessMonitor || echo "Cannot check ProcessMonitor file type"
+          file build/libexithandler.so* || echo "Cannot check exitHandler file type"
+          echo "Build verification complete"

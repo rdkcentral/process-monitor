@@ -16,6 +16,8 @@ std::mutex gMutex;
 std::condition_variable gShutdown;
 
 static std::string gOutputFile;
+bool gCaptureMemData = false;
+std::string gMemPreloadLib;
 
 // Default to 30 seconds
 static int gDurationSeconds = 30;
@@ -30,6 +32,7 @@ static void displayUsage()
     printf("    -h, --help          Print this help and exit\n");
     printf("    -d, --duration      How long to capture data for (seconds)\n");
     printf("    -o  --output        File to save results to\n");
+    printf("    -m, --mem           Capture memory data\n");
 }
 
 /**
@@ -40,6 +43,7 @@ static void parseArgs(const int argc, char **argv)
     struct option longopts[] = {{"help", no_argument, nullptr, (int)'h'},
                                 {"duration", required_argument, nullptr, (int)'d'},
                                 {"output", required_argument, nullptr, (int)'o'},
+                                {"mem", required_argument, nullptr, (int)'m'},
                                 {nullptr, 0, nullptr, 0}};
 
     opterr = 0;
@@ -47,7 +51,7 @@ static void parseArgs(const int argc, char **argv)
     int option;
     int longindex;
 
-    while ((option = getopt_long(argc, argv, "hd:o:", longopts, &longindex)) != -1)
+    while ((option = getopt_long(argc, argv, "hd:o:m:", longopts, &longindex)) != -1)
     {
         switch (option)
         {
@@ -66,6 +70,19 @@ static void parseArgs(const int argc, char **argv)
         case 'o':
             gOutputFile = std::string(optarg);
             break;
+        case 'm':
+            {
+                std::string libPath = optarg ? std::string(optarg) : std::string{};
+                if (libPath.empty())
+                {
+                    Log("ERROR: --mem requires a library path");
+                    exit(EXIT_FAILURE);
+                }
+                gCaptureMemData = true;
+                gMemPreloadLib = libPath;
+                Log("Memory preload enabled with %s", gMemPreloadLib.c_str());
+                break;
+            }
         case '?':
             if (optopt == 'c')
                 fprintf(stderr, "Warning: Option -%c requires an argument.\n", optopt);

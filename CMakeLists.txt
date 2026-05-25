@@ -40,6 +40,18 @@ target_link_libraries(${PROJECT_NAME}
         Threads::Threads
         )
 
+add_library(exitHandler SHARED exitHandler.c)
+
+target_link_libraries(exitHandler Threads::Threads)
+
+set_target_properties(exitHandler PROPERTIES
+        OUTPUT_NAME exithandler
+        VERSION 1.0.0
+        SOVERSION 1)
+
+install(TARGETS exitHandler
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
 install(TARGETS ${PROJECT_NAME}
         RUNTIME DESTINATION bin
         )

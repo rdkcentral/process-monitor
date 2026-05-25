@@ -7,6 +7,7 @@
 #include <regex>
 #include <string>
 #include <vector>
+#include <optional>
 
 /**
  * Often commands will be prefixed with the interpreter to use (e.g. /bin/sh -c echo "hello world"). Strip
@@ -34,6 +35,13 @@ struct processInfo
     std::string grandparentCommandLine;
 
     std::string systemdServiceName;
+
+    // Memory statistics (optional, populated when --mem is used)
+    std::optional<unsigned long> pss;           // Proportional Set Size (KB)
+    std::optional<unsigned long> swapPss;      // Swap PSS (KB)
+    std::optional<unsigned long> rss;          // Resident Set Size (KB)
+    std::optional<unsigned long> utime;        // User CPU time (jiffies)
+    std::optional<unsigned long> stime;        // System CPU time (jiffies)
 
     /**
      * Use some heuristics to try and get a suitable name for the timeline group
