@@ -1,0 +1,6 @@
+.git
+.gitignore
+build
+.idea
+results_gui/results.js
+*.swp

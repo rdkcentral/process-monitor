@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2023 Stephen Foulds
 
+#define _XOPEN_SOURCE 700
+
 #include "ProcessMonitor.h"
 #include "Log.h"
 
@@ -33,8 +35,6 @@
 #define OP_RET (BPF_RET | BPF_K)
 #define BPF_ALLOW 0xffffffff
 #define BPF_DENY 0
-
-#define _XOPEN_SOURCE 700
 
 #define MOUNT_DIR "/media/apps"
 #define ETC_DIR "/etc"
@@ -388,6 +388,19 @@ static bool writeFile(const char *path, const char *content, bool append = false
     return true;
 }
 
+static bool isSamePathTarget(const char *pathA, const char *pathB)
+{
+    struct stat statA;
+    struct stat statB;
+
+    if (stat(pathA, &statA) != 0 || stat(pathB, &statB) != 0)
+    {
+        return false;
+    }
+
+    return (statA.st_dev == statB.st_dev) && (statA.st_ino == statB.st_ino);
+}
+
 /**
  * References:
  * * https://nick-black.com/dankwiki/index.php/The_Proc_Connector_and_Socket_Filters
@@ -456,6 +469,14 @@ bool ProcessMonitor::Start()
     
     if (mValid)
     {
+        if (gCaptureMemData)
+        {
+            if (unlink("/tmp/exitHandler.txt") != 0 && errno != ENOENT)
+            {
+                Log("Warning: failed to clear /tmp/exitHandler.txt: %s", strerror(errno));
+            }
+        }
+
         mStart = std::chrono::system_clock::now();
         mListen = setListenMode(true);
 
@@ -974,6 +995,26 @@ bool ProcessMonitor::setupMemPreload()
         return false;
     }
 
+    if (isSamePathTarget(ETC_DIR, mountEtcPath))
+    {
+        Log("Detected existing bind mount from %s to %s; attempting recovery", mountEtcPath, ETC_DIR);
+        int staleUmountRc = std::system("/bin/umount /etc");
+        if (staleUmountRc != 0)
+        {
+            if (staleUmountRc == -1)
+            {
+                Log("Failed to execute stale mount recovery umount: %s", strerror(errno));
+            }
+            else
+            {
+                Log("Stale mount recovery umount returned non-zero status: %d", staleUmountRc);
+            }
+            Log("Refusing to proceed while %s is still bind-mounted", ETC_DIR);
+            return false;
+        }
+        Log("Recovered stale bind mount on %s", ETC_DIR);
+    }
+
     // Clear existing mount directory
     if (!clearDirectory(mountEtcPath))
     {
@@ -1078,6 +1119,21 @@ void ProcessMonitor::teardownMemPreload()
 
     Log("Tearing down bind-mounted %s for memory preload", ETC_DIR);
 
+    // Clear /etc/ld.so.preload while overlay is still mounted.
+    char preloadPath[PATH_MAX];
+    int ret = snprintf(preloadPath, sizeof(preloadPath), "%s/ld.so.preload", ETC_DIR);
+    if (ret < 0 || ret >= (int)sizeof(preloadPath))
+    {
+        Log("Preload path too long");
+    }
+    else
+    {
+        if (!writeFile(preloadPath, "", false))
+        {
+            Log("Warning: failed to clear %s", preloadPath);
+        }
+    }
+
     // Unmount /etc
     Log("Unmounting %s", ETC_DIR);
     int umountRc = std::system("/bin/umount /etc");
@@ -1092,7 +1148,6 @@ void ProcessMonitor::teardownMemPreload()
             Log("Umount command returned non-zero status: %d", umountRc);
         }
         Log("Manual cleanup required for %s", ETC_DIR);
-        mMemPreloadActive = false;
         return;
     }
     Log("Successfully unmounted %s", ETC_DIR);
@@ -1120,21 +1175,6 @@ void ProcessMonitor::teardownMemPreload()
     else
     {
         Log("Successfully removed %s", mountEtcPath);
-    }
-
-    // Clear /etc/ld.so.preload
-    char preloadPath[PATH_MAX];
-    ret = snprintf(preloadPath, sizeof(preloadPath), "%s/ld.so.preload", ETC_DIR);
-    if (ret < 0 || ret >= (int)sizeof(preloadPath))
-    {
-        Log("Preload path too long");
-    }
-    else
-    {
-        if (!writeFile(preloadPath, "", false))
-        {
-            Log("Warning: failed to clear %s", preloadPath);
-        }
     }
 
     mMemPreloadActive = false;
