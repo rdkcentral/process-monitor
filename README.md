@@ -152,10 +152,11 @@ When --mem is used:
 
 Safety and recovery behaviors implemented in code:
 
-- /tmp/exitHandler.txt is cleared at the start of each memory-enabled capture
+- /tmp/exitHandler.txt is cleared before the preload overlay is activated, so early exit records are not lost during setup
 - If a stale bind mount is detected from a previous run, recovery unmount is attempted before reuse
 - If teardown unmount fails, preload-active state is retained to allow retry and avoid false-clean status
 - Overlay /etc/ld.so.preload is cleared before unmounting overlay
+- RSS values in exit-handler records are converted using the current system page size
 
 Operational note:
 

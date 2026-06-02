@@ -473,44 +473,45 @@ ProcessMonitor::~ProcessMonitor()
  */
 bool ProcessMonitor::Start()
 {
+    if (!mValid)
+    {
+        return false;
+    }
+
     bool overlayJustActivated = false;
-    if (gCaptureMemData && !mMemPreloadActive) {
-        if (!setupMemPreload()) {
+    if (gCaptureMemData && !mMemPreloadActive)
+    {
+        if (unlink("/tmp/exitHandler.txt") != 0 && errno != ENOENT)
+        {
+            Log("Warning: failed to clear /tmp/exitHandler.txt: %s", strerror(errno));
+        }
+
+        if (!setupMemPreload())
+        {
             Log("Failed to set up memory preload");
             return false;
         }
         overlayJustActivated = true;
     }
-    
-    if (mValid)
+
+    mStart = std::chrono::system_clock::now();
+    mListen = setListenMode(true);
+
+    if (mListen)
     {
-        if (gCaptureMemData)
+        mMessageReceiver = std::thread(&ProcessMonitor::receiveMessages, this);
+
+        if (mMessageReceiver.joinable())
         {
-            if (unlink("/tmp/exitHandler.txt") != 0 && errno != ENOENT)
-            {
-                Log("Warning: failed to clear /tmp/exitHandler.txt: %s", strerror(errno));
-            }
+            return true;
         }
 
-        mStart = std::chrono::system_clock::now();
-        mListen = setListenMode(true);
-
-        if (mListen)
-        {
-            mMessageReceiver = std::thread(&ProcessMonitor::receiveMessages, this);
-
-            if (mMessageReceiver.joinable())
-            {
-                return true;
-            }
-
-            Log("Message receiver thread failed to start");
-            mListen = false;
-        }
-        else
-        {
-            Log("Failed to enable listen mode");
-        }
+        Log("Message receiver thread failed to start");
+        mListen = false;
+    }
+    else
+    {
+        Log("Failed to enable listen mode");
     }
 
     if (overlayJustActivated)
@@ -993,6 +994,11 @@ bool ProcessMonitor::setupMemPreload()
     {
         return true;
     }
+    if (!mValid)
+    {
+        Log("ProcessMonitor is not valid; skipping memory preload setup");
+        return false;
+    }
     if (gMemPreloadLib.empty())
     {
         Log("Memory preload requested but no library path provided");
@@ -1169,8 +1175,8 @@ void ProcessMonitor::teardownMemPreload()
 
     // Clean up mount directory
     char mountEtcPath[PATH_MAX];
-    int ret = snprintf(mountEtcPath, sizeof(mountEtcPath), "%s/etc", MOUNT_DIR);
-    if (ret < 0 || ret >= (int)sizeof(mountEtcPath))
+        int mountPathRet = snprintf(mountEtcPath, sizeof(mountEtcPath), "%s/etc", MOUNT_DIR);
+    if (mountPathRet < 0 || mountPathRet >= (int)sizeof(mountEtcPath))
     {
         Log("Mount path too long");
         mMemPreloadActive = false;
@@ -1265,6 +1271,8 @@ void ProcessMonitor::mergeExitHandlerData()
             Log("Failed to parse timestamp: %s", timestampStr.c_str());
             continue;
         }
+
+        tm.tm_isdst = -1;
 
         auto timestamp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
 

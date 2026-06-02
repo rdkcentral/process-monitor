@@ -168,13 +168,22 @@ void printMyStatFromLib()
     sprintf(pathTmp, "/proc/%d/stat", pid);
     FILE *fp = fopen(pathTmp, "r");
     if (fp) {
-        if (5 <= fscanf(fp, "%*d %*c%s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu %*d %*d %*d %*d %*d %*d %*u %lu %lu",
-                        pathTmp, &utime, &stime, &vsize, &rss)) {
-                pathTmp[strlen(pathTmp)-1] = '\0';
+        char comm[PATH_MAX];
+        if (6 <= fscanf(fp, "%*d (%255[^)]) %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu %*d %*d %*d %*d %*d %*d %*u %lu %lu",
+                        comm, &utime, &stime, &vsize, &rss)) {
+                snprintf(pathTmp, sizeof(pathTmp), "%s", comm);
         }
         fclose(fp);
         if (vsize) {
             unsigned long pss=0, swappss=0;
+            unsigned long pageSize = (unsigned long)sysconf(_SC_PAGESIZE);
+            unsigned long rssKb;
+
+            if (pageSize == 0) {
+                pageSize = 4096;
+            }
+
+            rssKb = (rss * pageSize) / 1024;
             getPSSandSwapPSS(pid, &pss, &swappss);
             fp = fopen("/tmp/exitHandler.txt", "a");
             if (fp) {
@@ -187,11 +196,11 @@ void printMyStatFromLib()
                     sprintf(tbuff, "%lu", timenow); // see if this is warned in 32 bit systems..
                 }
 #ifdef TEST_ME
-                fwrite(buff, sprintf(buff, "%s: %d %s %lu %lu %lu, %lu[%lu], %lu[%lu]\n", tbuff, pid, pathTmp, utime, stime, rss*4, pss, testpsstotal, swappss, testswappsstotal), 1, fp);
+                fwrite(buff, sprintf(buff, "%s: %d %s %lu %lu %lu, %lu[%lu], %lu[%lu]\n", tbuff, pid, pathTmp, utime, stime, rssKb, pss, testpsstotal, swappss, testswappsstotal), 1, fp);
 #else
-                fwrite(buff, sprintf(buff, "%s: %d %s %lu %lu %lu, %lu, %lu\n", tbuff, pid, pathTmp, utime, stime, rss*4, pss, swappss), 1, fp);
+                fwrite(buff, sprintf(buff, "%s: %d %s %lu %lu %lu, %lu, %lu\n", tbuff, pid, pathTmp, utime, stime, rssKb, pss, swappss), 1, fp);
 #endif
-                PRINT("%d[%s]:\nutime %lu\nstime %lu\nvsize %lu\nrss %lu\npss %lu[%lu]\nswappss %lu[%lu]\n", pid, pathTmp, utime, stime, vsize/1024, rss*4, pss, testpsstotal, swappss, testswappsstotal);
+                PRINT("%d[%s]:\nutime %lu\nstime %lu\nvsize %lu\nrss %lu\npss %lu[%lu]\nswappss %lu[%lu]\n", pid, pathTmp, utime, stime, vsize/1024, rssKb, pss, testpsstotal, swappss, testswappsstotal);
                 fclose(fp);
             }
 		}
