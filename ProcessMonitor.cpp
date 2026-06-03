@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <map>
+#include <sstream>
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <dirent.h>
@@ -56,6 +57,185 @@
 
 extern bool gCaptureMemData;
 extern std::string gMemPreloadLib;
+
+static std::string trimWhitespace(const std::string &value)
+{
+    const size_t start = value.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos)
+    {
+        return {};
+    }
+
+    const size_t end = value.find_last_not_of(" \t\r\n");
+    return value.substr(start, end - start + 1);
+}
+
+static bool parseUnsignedLongToken(const std::string &token, unsigned long &value)
+{
+    errno = 0;
+    char *endPtr = nullptr;
+    const unsigned long parsed = strtoul(token.c_str(), &endPtr, 10);
+    if (errno != 0 || endPtr == token.c_str() || *endPtr != '\0')
+    {
+        return false;
+    }
+
+    value = parsed;
+    return true;
+}
+
+static bool containsExactLine(const std::string &content, const std::string &line)
+{
+    std::istringstream stream(content);
+    std::string current;
+    while (std::getline(stream, current))
+    {
+        if (trimWhitespace(current) == line)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static std::string buildPreloadContent(const std::string &originalContent, bool originalFileExisted, const std::string &libraryPath)
+{
+    std::string content = originalFileExisted ? originalContent : "";
+    if (containsExactLine(content, libraryPath))
+    {
+        return content;
+    }
+
+    if (!content.empty() && content.back() != '\n')
+    {
+        content.push_back('\n');
+    }
+    content += libraryPath;
+    content.push_back('\n');
+    return content;
+}
+
+static bool readFileContent(const char *path, std::string &content, bool *exists = nullptr)
+{
+    std::ifstream file(path, std::ios::in | std::ios::binary);
+    if (!file)
+    {
+        if (errno == ENOENT)
+        {
+            content.clear();
+            if (exists != nullptr)
+            {
+                *exists = false;
+            }
+            return true;
+        }
+
+        Log("Failed to open file %s: %s", path, strerror(errno));
+        return false;
+    }
+
+    content.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    if (file.bad())
+    {
+        Log("Failed while reading file %s", path);
+        return false;
+    }
+
+    if (exists != nullptr)
+    {
+        *exists = true;
+    }
+
+    return true;
+}
+
+static bool parseExitHandlerDataFields(const std::string &data,
+                                       pid_t &pid,
+                                       std::string &processName,
+                                       unsigned long &utime,
+                                       unsigned long &stime,
+                                       unsigned long &rss,
+                                       unsigned long &pss,
+                                       unsigned long &swapPss)
+{
+    std::string dataStr = trimWhitespace(data);
+
+    // Expected logical shape:
+    // "pid processName utime stime rss, pss, swapPss"
+    const size_t lastComma = dataStr.rfind(',');
+    if (lastComma == std::string::npos)
+    {
+        return false;
+    }
+
+    const size_t secondLastComma = dataStr.rfind(',', lastComma - 1);
+    if (secondLastComma == std::string::npos)
+    {
+        return false;
+    }
+
+    const std::string swapPssToken = trimWhitespace(dataStr.substr(lastComma + 1));
+    const std::string pssToken = trimWhitespace(dataStr.substr(secondLastComma + 1, lastComma - secondLastComma - 1));
+    std::string left = trimWhitespace(dataStr.substr(0, secondLastComma));
+
+    const size_t rssPos = left.find_last_of(" \t");
+    if (rssPos == std::string::npos)
+    {
+        return false;
+    }
+    const std::string rssToken = trimWhitespace(left.substr(rssPos + 1));
+    left = trimWhitespace(left.substr(0, rssPos));
+
+    const size_t stimePos = left.find_last_of(" \t");
+    if (stimePos == std::string::npos)
+    {
+        return false;
+    }
+    const std::string stimeToken = trimWhitespace(left.substr(stimePos + 1));
+    left = trimWhitespace(left.substr(0, stimePos));
+
+    const size_t utimePos = left.find_last_of(" \t");
+    if (utimePos == std::string::npos)
+    {
+        return false;
+    }
+    const std::string utimeToken = trimWhitespace(left.substr(utimePos + 1));
+    const std::string pidAndName = trimWhitespace(left.substr(0, utimePos));
+
+    const size_t pidSep = pidAndName.find_first_of(" \t");
+    if (pidSep == std::string::npos)
+    {
+        return false;
+    }
+
+    const std::string pidToken = trimWhitespace(pidAndName.substr(0, pidSep));
+    processName = trimWhitespace(pidAndName.substr(pidSep + 1));
+    if (processName.empty())
+    {
+        return false;
+    }
+
+    errno = 0;
+    char *pidEnd = nullptr;
+    const long parsedPid = strtol(pidToken.c_str(), &pidEnd, 10);
+    if (errno != 0 || pidEnd == pidToken.c_str() || *pidEnd != '\0' || parsedPid < 0)
+    {
+        return false;
+    }
+
+    if (!parseUnsignedLongToken(utimeToken, utime) ||
+        !parseUnsignedLongToken(stimeToken, stime) ||
+        !parseUnsignedLongToken(rssToken, rss) ||
+        !parseUnsignedLongToken(pssToken, pss) ||
+        !parseUnsignedLongToken(swapPssToken, swapPss))
+    {
+        return false;
+    }
+
+    pid = static_cast<pid_t>(parsedPid);
+    return true;
+}
 
 /**
  * @brief Recursively remove all files and subdirectories in a directory
@@ -199,6 +379,13 @@ static bool createDirectory(const char *path)
  */
 static bool copyDirectory(const char *src, const char *dest)
 {
+    struct stat srcDirStat;
+    if (lstat(src, &srcDirStat) != 0)
+    {
+        Log("Failed to stat source directory %s: %s", src, strerror(errno));
+        return false;
+    }
+
     DIR *dir = opendir(src);
     if (dir == nullptr)
     {
@@ -211,6 +398,16 @@ static bool copyDirectory(const char *src, const char *dest)
     {
         closedir(dir);
         return false;
+    }
+
+    if (chown(dest, srcDirStat.st_uid, srcDirStat.st_gid) != 0)
+    {
+        Log("Warning: Failed to preserve ownership on directory %s: %s", dest, strerror(errno));
+    }
+
+    if (chmod(dest, srcDirStat.st_mode & 07777) != 0)
+    {
+        Log("Warning: Failed to preserve mode on directory %s: %s", dest, strerror(errno));
     }
 
     struct dirent *entry;
@@ -277,6 +474,10 @@ static bool copyDirectory(const char *src, const char *dest)
                 Log("Failed to create symlink %s -> %s: %s", destPath, linkTarget, strerror(errno));
                 success = false;
             }
+            else if (lchown(destPath, statbuf.st_uid, statbuf.st_gid) != 0)
+            {
+                Log("Warning: Failed to preserve symlink ownership for %s: %s", destPath, strerror(errno));
+            }
         }
         else if (S_ISREG(statbuf.st_mode))
         {
@@ -289,7 +490,7 @@ static bool copyDirectory(const char *src, const char *dest)
                 continue;
             }
 
-            int destFd = open(destPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, statbuf.st_mode);
+            int destFd = open(destPath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
             if (destFd < 0)
             {
                 Log("Failed to open destination file %s: %s", destPath, strerror(errno));
@@ -320,6 +521,24 @@ static bool copyDirectory(const char *src, const char *dest)
                 success = false;
             }
 
+            if (fchown(destFd, statbuf.st_uid, statbuf.st_gid) != 0)
+            {
+                Log("Warning: Failed to preserve ownership for %s: %s", destPath, strerror(errno));
+            }
+
+            if (fchmod(destFd, statbuf.st_mode & 07777) != 0)
+            {
+                Log("Warning: Failed to preserve mode for %s: %s", destPath, strerror(errno));
+            }
+
+            struct timespec fileTimes[2];
+            fileTimes[0] = statbuf.st_atim;
+            fileTimes[1] = statbuf.st_mtim;
+            if (futimens(destFd, fileTimes) != 0)
+            {
+                Log("Warning: Failed to preserve timestamps for %s: %s", destPath, strerror(errno));
+            }
+
             close(srcFd);
             close(destFd);
 
@@ -327,16 +546,15 @@ static bool copyDirectory(const char *src, const char *dest)
             {
                 continue;
             }
-
-            // Preserve timestamps
-            struct timespec times[2];
-            times[0] = statbuf.st_atim;
-            times[1] = statbuf.st_mtim;
-            if (utimensat(AT_FDCWD, destPath, times, 0) != 0)
-            {
-                Log("Warning: Failed to preserve timestamps for %s: %s", destPath, strerror(errno));
-            }
         }
+    }
+
+    struct timespec dirTimes[2];
+    dirTimes[0] = srcDirStat.st_atim;
+    dirTimes[1] = srcDirStat.st_mtim;
+    if (utimensat(AT_FDCWD, dest, dirTimes, 0) != 0)
+    {
+        Log("Warning: Failed to preserve directory timestamps for %s: %s", dest, strerror(errno));
     }
 
     closedir(dir);
@@ -1067,6 +1285,25 @@ bool ProcessMonitor::setupMemPreload()
     }
     Log("Successfully copied %s to %s", ETC_DIR, mountEtcPath);
 
+    // Capture existing preload file content from the copied tree.
+    char copiedPreloadPath[PATH_MAX];
+    ret = snprintf(copiedPreloadPath, sizeof(copiedPreloadPath), "%s/ld.so.preload", mountEtcPath);
+    if (ret < 0 || ret >= (int)sizeof(copiedPreloadPath))
+    {
+        Log("Copied preload path too long");
+        clearDirectory(mountEtcPath);
+        rmdir(mountEtcPath);
+        return false;
+    }
+
+    if (!readFileContent(copiedPreloadPath, mOriginalLdSoPreloadContent, &mOriginalLdSoPreloadExisted))
+    {
+        clearDirectory(mountEtcPath);
+        rmdir(mountEtcPath);
+        return false;
+    }
+    mOriginalLdSoPreloadCaptured = true;
+
     // Bind mount using mount-copybind
     char mountCmd[PATH_MAX * 2 + 64];
     ret = snprintf(mountCmd, sizeof(mountCmd), "/sbin/mount-copybind %s %s", mountEtcPath, ETC_DIR);
@@ -1112,7 +1349,10 @@ bool ProcessMonitor::setupMemPreload()
         return false;
     }
 
-    std::string preloadContent = gMemPreloadLib + "\n";
+    const std::string preloadContent = buildPreloadContent(
+        mOriginalLdSoPreloadContent,
+        mOriginalLdSoPreloadExisted,
+        gMemPreloadLib);
     if (!writeFile(preloadPath, preloadContent.c_str(), false))
     {
         Log("Failed to write preload library to %s", preloadPath);
@@ -1123,6 +1363,9 @@ bool ProcessMonitor::setupMemPreload()
         }
         clearDirectory(mountEtcPath);
         rmdir(mountEtcPath);
+        mOriginalLdSoPreloadCaptured = false;
+        mOriginalLdSoPreloadExisted = false;
+        mOriginalLdSoPreloadContent.clear();
         return false;
     }
 
@@ -1140,7 +1383,7 @@ void ProcessMonitor::teardownMemPreload()
 
     Log("Tearing down bind-mounted %s for memory preload", ETC_DIR);
 
-    // Clear /etc/ld.so.preload while overlay is still mounted.
+    // Restore /etc/ld.so.preload while overlay is still mounted.
     char preloadPath[PATH_MAX];
     int ret = snprintf(preloadPath, sizeof(preloadPath), "%s/ld.so.preload", ETC_DIR);
     if (ret < 0 || ret >= (int)sizeof(preloadPath))
@@ -1149,9 +1392,12 @@ void ProcessMonitor::teardownMemPreload()
     }
     else
     {
-        if (!writeFile(preloadPath, "", false))
+        const std::string restoredPreload =
+            (mOriginalLdSoPreloadCaptured && mOriginalLdSoPreloadExisted) ? mOriginalLdSoPreloadContent : "";
+
+        if (!writeFile(preloadPath, restoredPreload.c_str(), false))
         {
-            Log("Warning: failed to clear %s", preloadPath);
+            Log("Warning: failed to restore %s", preloadPath);
         }
     }
 
@@ -1199,6 +1445,9 @@ void ProcessMonitor::teardownMemPreload()
     }
 
     mMemPreloadActive = false;
+    mOriginalLdSoPreloadCaptured = false;
+    mOriginalLdSoPreloadExisted = false;
+    mOriginalLdSoPreloadContent.clear();
     Log("Memory preload teardown complete");
 }
 
@@ -1278,10 +1527,10 @@ void ProcessMonitor::mergeExitHandlerData()
 
         // Parse data: " pid processName utime stime rss, pss, swappss"
         pid_t pid;
-        char processName[256];
+        std::string processName;
         unsigned long utime, stime, rss, pss, swapPss;
 
-        if (sscanf(dataStr.c_str(), " %d %255s %lu %lu %lu, %lu, %lu", &pid, processName, &utime, &stime, &rss, &pss, &swapPss) == 7)
+        if (parseExitHandlerDataFields(dataStr, pid, processName, utime, stime, rss, pss, swapPss))
         {
             ExitHandlerEntry entry;
             entry.timestamp = timestamp;
@@ -1320,11 +1569,12 @@ void ProcessMonitor::mergeExitHandlerData()
         auto& entries = it->second;
 
         // Find entry with nearest timestamp to process.endTime
-        ExitHandlerEntry* bestMatch = nullptr;
+        size_t bestMatchIndex = entries.size();
         auto minTimeDiff = std::chrono::seconds::max(); // Start with large value
 
-        for (auto& entry : entries)
+        for (size_t idx = 0; idx < entries.size(); ++idx)
         {
+            auto &entry = entries[idx];
             auto timeDiff = std::chrono::duration_cast<std::chrono::seconds>(
                 process.endTime > entry.timestamp ?
                 process.endTime - entry.timestamp :
@@ -1333,20 +1583,22 @@ void ProcessMonitor::mergeExitHandlerData()
             if (timeDiff < minTimeDiff)
             {
                 minTimeDiff = timeDiff;
-                bestMatch = &entry;
+                bestMatchIndex = idx;
             }
         }
 
-        if (bestMatch == nullptr)
+        if (bestMatchIndex == entries.size())
         {
             continue;
         }
+
+        auto &bestMatch = entries[bestMatchIndex];
 
         // Optional name validation for large timestamp differences (fallback check)
         if (minTimeDiff > std::chrono::seconds(10))
         {
             std::string processBasename = process.GetStrippedName();
-            std::string entryBasename = bestMatch->processName;
+            std::string entryBasename = bestMatch.processName;
 
             // Extract basename from entry
             size_t slashPos = entryBasename.find_last_of('/');
@@ -1374,11 +1626,19 @@ void ProcessMonitor::mergeExitHandlerData()
         }
 
         // Copy memory stats
-        process.pss = bestMatch->pss;
-        process.swapPss = bestMatch->swapPss;
-        process.rss = bestMatch->rss;
-        process.utime = bestMatch->utime;
-        process.stime = bestMatch->stime;
+        process.pss = bestMatch.pss;
+        process.swapPss = bestMatch.swapPss;
+        process.rss = bestMatch.rss;
+        process.utime = bestMatch.utime;
+        process.stime = bestMatch.stime;
+
+        // Consume the matched entry so it cannot be reused for another exited process when PIDs are recycled.
+        entries.erase(entries.begin() + static_cast<std::vector<ExitHandlerEntry>::difference_type>(bestMatchIndex));
+        if (entries.empty())
+        {
+            exitHandlerMap.erase(it);
+        }
+
         matchedCount++;
     }
 

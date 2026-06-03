@@ -77,5 +77,8 @@ private:
     std::chrono::time_point<std::chrono::system_clock> mEnd;
 
     bool mMemPreloadActive = false;
+    bool mOriginalLdSoPreloadCaptured = false;
+    bool mOriginalLdSoPreloadExisted = false;
+    std::string mOriginalLdSoPreloadContent;
     bool mExitHandlerDataMerged = false;
 };
