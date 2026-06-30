@@ -1,102 +1,261 @@
 # Linux Process Monitor
-Record linux process exec/exit events and produce a timeline of which processes ran.
 
-Designed to help better understand what background processes are running and how long they take to execute.
+Linux Process Monitor records process exec and exit events from the kernel and writes timeline-ready output for visualization and post-analysis.
+
+It is designed for profiling process churn on embedded and service-heavy systems, with optional per-process memory data capture at exit.
+
+## What It Captures
+
+- Process exec and exit events from the kernel proc connector (netlink)
+- Start and end timestamps for each observed process
+- PID, parent and grandparent command lines (best-effort)
+- Grouping and summary stats suitable for timeline and frequency analysis
+- Optional memory stats at process exit when memory preload mode is enabled
+
+## How It Works
+
+```mermaid
+flowchart TD
+		A[Start ProcessMonitor] --> B[Parse CLI args]
+		B --> C[Open netlink connector socket]
+		C --> D[Apply BPF filter for EXEC and EXIT]
+		D --> E{Memory mode enabled?}
+		E -- No --> F[Enable listen mode]
+		E -- Yes --> G[Setup preload overlay on /etc]
+		G --> H[Clear /tmp/exitHandler.txt]
+		H --> F
+		F --> I[Receive EXEC and EXIT events]
+		I --> J[Track running and exited processes]
+		J --> K[Stop capture]
+		K --> L{Memory mode enabled?}
+		L -- Yes --> M[Teardown preload overlay]
+		L -- No --> N[Build JSON]
+		M --> O[Merge /tmp/exitHandler.txt memory records]
+		O --> N
+		N --> P[Write let results = ... to output file]
+```
+
+## Requirements
+
+- Linux system with proc connector support
+- Root privileges to listen to proc connector events
+- CMake and C++ compiler toolchain
+- Kernel support for netlink process events:
+	- CONFIG_NET
+	- CONFIG_CONNECTOR
+	- CONFIG_PROC_EVENTS
+	- CONFIG_PROC_FS (for /proc lookups used by command-line and parent/service resolution)
+- For memory mode:
+	- A valid preload library path passed via --mem
+	- /sbin/mount-copybind available
+	- Ability to bind-mount /etc
+
+Quick kernel config check (if /proc/config.gz is available):
+
+```sh
+zgrep -E 'CONFIG_(NET|CONNECTOR|PROC_EVENTS|PROC_FS)=' /proc/config.gz
+```
+
+Expected values are typically =y (built-in) or =m (module), except CONFIG_PROC_EVENTS which is generally built-in on kernels that provide proc connector events.
 
 ## Build
-```shell
-$ mkdir build && cd build
-$ cmake -DCMAKE_BUILD_TYPE=Release ../
-$ make -j$(nproc)
+
+```sh
+mkdir build
+cd build
+cmake -DCMAKE_BUILD_TYPE=Release ../
+make -j"$(nproc)"
 ```
+
+## Build And Run With Docker
+
+A minimal multi-stage Dockerfile is included for portable builds.
+
+Build image:
+
+```sh
+docker build -t process-monitor:latest .
+```
+
+Smoke test (shows CLI help):
+
+```sh
+docker run --rm process-monitor:latest --help
+```
+
+Run capture (Linux host required):
+
+```sh
+docker run --rm \
+	--privileged \
+	--pid=host \
+	-v /tmp/processMonitor:/tmp/processMonitor \
+	process-monitor:latest \
+	--duration 60 --output /tmp/processMonitor/results.js
+```
+
+Run with memory mode:
+
+```sh
+docker run --rm \
+	--privileged \
+	--pid=host \
+	-v /tmp/processMonitor:/tmp/processMonitor \
+	process-monitor:latest \
+	--duration 60 \
+	--output /tmp/processMonitor/results.js \
+	--mem /usr/local/lib/libexithandler.so
+```
+
+Notes:
+
+- Building the image works from macOS.
+- Functional process-event capture depends on Linux kernel features and should be run on a Linux host/device.
+- The `--privileged` and `--pid=host` flags are required for this monitor's kernel event and mount-related behavior.
 
 ## Run
-Start by running ProcessMonitor as root, providing a duration to capture for (in seconds) and a file to save the results into. Note the output file will be a javascript file.
-```shell
-$ ./ProcessMonitor --duration 60 --output /tmp/processMonitor/results.js
+
+### Basic capture
+
+```sh
+./ProcessMonitor --duration 60 --output /tmp/processMonitor/results.js
 ```
 
-## Analysis
-There are two ways to analyse the results:
-* Graphical timeline view - useful to get a visulisation of running processes and execution times
-* Textual summary (python script) - useful to get a quick summary of spawned processes
+### Capture with memory exit stats
 
-### Timeline View
-Copy the generated output file to `<this-repo-dir>/results_gui/results.js` (must be called results.js for now)
-
-Load the index.html file (Chrome works best) and a timeline of the observed processes should appear.
-
-![screenshot of timeline](./docs/timeline.png)
-
-Note it may take a few minutes for a timeline to load, especially for longer captures with lots of data (your browser may warn you the page is unresponsive, just allow it to continue - be patient!)
-
-The tool will do it's best to work out the "true" command name - i.e. if the command is run under a specific interpreter (`sh -c ls -a`), the tool will work out the true command is actually `ls`.
-
-#### Timeline tips
-* Hold `Ctrl` and scroll to zoom in/out
-* Processes are grouped by their parent process
-  * Only show specific parent processes using the filter dropdown
-* Click on a process to view more information
-* When zoomed out, some processes may be clustered together - shown by a number representing the number of processes in that cluster
-  * Zoom in or double-click the cluster to see details!
-
-### Textual Summary - Python Analysis Script
-For large datasets, the timeline may fail to load or be unwieldly. For this scenario, a python script `results_parser.py` is included.
-
-Usage:
-```
-$ python3 ./results_parser.py <path-to-results.js>
+```sh
+./ProcessMonitor --duration 60 --output /tmp/processMonitor/results.js --mem /path/to/libexithandler.so
 ```
 
-This will analyse the data and produce a report. The report is broken down into 3 sections:
+## CLI Options
 
-#### Processes by Group
-This is a list of the number of processes run by a particular script/daemon, including the total number of processes spawned and a breakdown of the processes run.
+- -h, --help
+	- Print help and exit
+- -d, --duration <seconds>
+	- Capture duration in seconds
+	- Default is 30
+- -o, --output <file>
+	- Output JavaScript file path (required)
+- -m, --mem <path>
+	- Enable memory capture mode
+	- Requires path to preload library (for example libexithandler.so)
 
-For example:
+## Memory Capture Mode Details
+
+When --mem is used:
+
+- ProcessMonitor creates a copied /etc tree under /media/apps/etc
+- It bind-mounts that copy over live /etc using mount-copybind
+- It writes the preload library path to /etc/ld.so.preload in the overlay
+- The preload library appends process-exit memory records to /tmp/exitHandler.txt
+- On stop, ProcessMonitor merges those records into process results
+
+Safety and recovery behaviors implemented in code:
+
+- /tmp/exitHandler.txt is cleared before the preload overlay is activated, so early exit records are not lost during setup
+- If a stale bind mount is detected from a previous run, recovery unmount is attempted before reuse
+- If teardown unmount fails, preload-active state is retained to allow retry and avoid false-clean status
+- Overlay /etc/ld.so.preload is cleared before unmounting overlay
+- RSS values in exit-handler records are converted using the current system page size
+
+Operational note:
+
+- Memory mode temporarily affects system-wide /etc while capture is running, so it should be used with care on live systems.
+
+## Output Format
+
+The output file is JavaScript, not plain JSON. It is written as:
+
+```js
+let results = { ... };
 ```
-Processes per group
------------------------
-/usr/sbin/collectd: 55269
-	|- awk: 55269 (100.0%)
-/lib/rdk/collectd-exec-xi1.sh: 4232
-	|- awk: 1244 (29.4%)
-	|- pgrep: 1153 (27.24%)
-	|- tail: 638 (15.08%)
-	|- top: 551 (13.02%)
-	|- sleep: 382 (9.03%)
-	|- tr: 264 (6.24%)
+
+Top-level keys:
+
+- processes
+- groups
+- stats
+- start
+- end
+
+### processes[] fields
+
+- id
+	- Composite string: pid_startTimeMs
+- pid
+- content
+	- Stripped process name
+- title
+	- Stripped command line
+- group
+	- Derived parent grouping label
+- start
+	- Epoch milliseconds
+- end
+	- Epoch milliseconds
+- fullCommandLine
+- parentCommandLine
+- grandparentCommandLine
+- exitCode
+- systemdService
+- Optional fields when memory data is available:
+	- pss (KB)
+	- swapPss (KB)
+	- rss (KB)
+	- utime (jiffies)
+	- stime (jiffies)
+
+### groups[] fields
+
+- id
+- content
+
+### stats
+
+- stats.processes[]
+	- process
+	- frequency
+- stats.services[]
+	- serviceName
+	- frequency
+
+## Timeline Analysis
+
+Copy generated output to:
+
+- results_gui/results.js
+
+Then open:
+
+- results_gui/index.html
+
+![Timeline screenshot](./docs/timeline.png)
+
+Tips:
+
+- Hold Ctrl and scroll to zoom
+- Click a process to inspect details
+- Use grouping filters to focus on parent process families
+- Zoom in to expand clusters
+
+## Textual Analysis Script
+
+For larger datasets, use:
+
+```sh
+python3 ./scripts/results_parser.py /path/to/results.js
 ```
 
-Here we can see:
+The script reports:
 
-* The collectd daemon ran 55269 child processes, 100% of which were `awk`
-* The `collectd-exec-xi1.sh` script executed 4232 processes, made up of 6 different unique processes. Of the 4232 processes, 1244 (29.4%) of them were awk.
+- Processes by group
+- Top systemd services
+- Top unique processes
 
-This data can be used to pinpoint daemons/scripts that frequently spawn child processes, and of those child processes which are run most often.
+## Notes on Name Normalization
 
-#### Top systemd services
-This is a list of the systemd services that spawned child processes, sorted by number of child processes seen.
+The monitor strips common interpreter prefixes to approximate the true command. Example:
 
-For example:
-```
-Top systemd services
------------------------
-collectd.service: 59427
-logrotate.service: 2843
-```
+- /bin/sh -c ls -alh becomes ls -alh for display
 
-Here, 59,427 child processes were run by the `collectd` systemd service.
-
-#### Top Unique Processes
-A list of all the processes seen during the ProcessMonitor run, ungrouped, and how many times they were seen.
-
-For example:
-```
-Top unique processes
------------------------
-awk: 57895
-sort: 1303
-grep: 1155
-```
-Here we see whilst ProcessMonitor was running, it saw `awk` run 57895 times in total.
+This improves grouping and frequency stats for shell-driven process trees.
