@@ -1,11 +1,11 @@
 DESCRIPTION = "Linux process monitor - track and record the execution times of all processes"
 
 LICENSE = "Apache-2.0"
-LIC_FILES_CHKSUM = "file://LICENSE;md5=894d9b830cb1f38db58741000f9c2c7f"
+LIC_FILES_CHKSUM = "file://LICENSE;md5="f105654e5d0696b9f9c0fb345979402d"
 
 S = "${WORKDIR}/git"
-SRC_URI = "https://github.com/TeknoVenus/ProcessMonitor.git;branch=main"
-SRCREV = "dc9c218e78c2e1a766df3d439b90f471da3db8fb"
+SRC_URI = "git://github.com/rdkcentral/process-monitor.git;protocol=https;branch=main"
+SRCREV = "${AUTOREV}"
 
 inherit cmake systemd
 
